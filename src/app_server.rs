@@ -12,7 +12,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 use tokio_util::sync::CancellationToken;
 
-use crate::account::{AccountIdentity, CachedAccountData, LoginChallenge, mask_email};
+use crate::account::{AccountIdentity, CachedAccountData, LoginChallenge};
 use crate::error::{AppError, Result};
 use crate::protocol::{IncomingMessage, RpcError, notification, parse_line, request};
 use crate::rate_limits::{parse_rate_limits, parse_token_usage};
@@ -385,7 +385,13 @@ fn parse_account_identity(result: &Value) -> Result<AccountIdentity> {
         ));
     }
     Ok(AccountIdentity {
-        masked_email: account.get("email").and_then(Value::as_str).map(mask_email),
+        email: account
+            .get("email")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|email| !email.is_empty())
+            .map(str::to_owned),
+        masked_email: None,
         plan_type: account
             .get("planType")
             .and_then(Value::as_str)
@@ -523,7 +529,7 @@ mod tests {
     use crate::error::AppError;
 
     #[test]
-    fn account_parser_accepts_unknown_fields_and_masks_email() {
+    fn account_parser_accepts_unknown_fields_and_preserves_email() {
         let result = parse_account_identity(&json!({
             "account": {
                 "type": "chatgpt",
@@ -534,7 +540,8 @@ mod tests {
             "requiresOpenaiAuth": true
         }))
         .unwrap();
-        assert_eq!(result.masked_email.as_deref(), Some("so***@example.com"));
+        assert_eq!(result.email.as_deref(), Some("someone@example.com"));
+        assert_eq!(result.masked_email, None);
     }
 
     #[test]

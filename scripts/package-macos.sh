@@ -43,8 +43,12 @@ do
 done
 iconutil -c icns "$ICON_WORK_DIR/icon.iconset" -o "$RESOURCES_DIR/AppIcon.icns"
 
-sed \
-  -e "s/@VERSION@/$(sed -n 's/^version = \"\\([^\"]*\\)\"/\\1/p' Cargo.toml | head -1)/" \
+APP_VERSION=$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -1)
+if [ -z "$APP_VERSION" ]; then
+  echo "Unable to read package version from Cargo.toml" >&2
+  exit 1
+fi
+sed -e "s/@VERSION@/$APP_VERSION/g" \
   "$PROJECT_ROOT/scripts/Info.plist.in" > "$CONTENTS_DIR/Info.plist"
 
 printf 'APPL????' > "$CONTENTS_DIR/PkgInfo"

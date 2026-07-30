@@ -103,8 +103,8 @@ Windows 构建设置了 GUI subsystem，因此双击不会额外弹出控制台�
 相互隔离的状态目录。
 
 浏览器通常会复用当前 ChatGPT 会话。添加第二、第三个账号时，请在 OpenAI
-官方登录页退出或切换到正确账号，再授权 Codex。应用只保存脱敏邮箱，完整邮箱
-不会作为内部 ID。
+官方登录页退出或切换到正确账号，再授权 Codex。完整邮箱会显示在账号卡片并
+保存在本机受限配置中，但不会作为内部 ID；账号内部身份仍是随机 UUID。
 
 账号数量没有写死为三个，可以继续添加；“刷新全部”仍默认依次查询。
 
@@ -141,7 +141,7 @@ Windows 构建设置了 GUI subsystem，因此双击不会额外弹出控制台�
 内容：
 
 ```text
-config.json                  非敏感设置、脱敏身份、最后成功缓存
+config.json                  本地设置、完整邮箱、套餐和最后成功缓存（受限）
 accounts/<uuid>/             该账号独立 CODEX_HOME（敏感）
 accounts/<uuid>/auth.json    可能存在；由 Codex 官方管理（高度敏感）
 logs/codex-usage-monitor.log 脱敏、限长诊断日志
@@ -154,7 +154,9 @@ logs/codex-usage-monitor.log 脱敏、限长诊断日志
 
 - 本应用没有密码输入框。不要把 ChatGPT 密码输入本应用。
 - 不读取、解析、复制、上传或显示 `auth.json`。
-- 不记录访问令牌、授权头、完整邮箱或完整授权响应。
+- `account/read` 返回的完整邮箱会显示在账号卡片并保存在权限受限的本机
+  `config.json`；不会上传到本项目的任何服务，也不会用作内部账号 ID。
+- 不向诊断日志记录访问令牌、授权头、完整邮箱或完整授权响应。
 - 启动 App Server 时会移除可能覆盖账号隔离的 API key/token 环境变量。
 - 每个进程只收到自己的 `CODEX_HOME`，不会修改系统全局环境变量。
 - 强制使用 Codex 官方 `file` 凭据存储以获得确定的多目录隔离。

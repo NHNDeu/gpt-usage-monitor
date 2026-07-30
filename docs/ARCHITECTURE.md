@@ -67,11 +67,13 @@ shutdown.
 
 ## Query and cache flow
 
-`account/read` produces only a masked email and plan. The complete email is
-never persisted. `account/rateLimits/read` is transformed into a list of all
-returned primary/secondary windows for every `limitId`. The last successful
-domain snapshot is saved with its UTC query timestamp. A later failure leaves
-that snapshot visible and the UI labels it as cached and, after the configured
+`account/read` produces the ChatGPT email and plan. The complete email is shown
+in the account card and persisted only in the permission-restricted local
+configuration; it is never used as the account identity or written to logs.
+`account/rateLimits/read` is transformed into a list of all returned
+primary/secondary windows for every `limitId`. The last successful domain
+snapshot is saved with its UTC query timestamp. A later failure leaves that
+snapshot visible and the UI labels it as cached and, after the configured
 threshold, stale.
 
 `account/usage/read` is optional. Failure of that secondary endpoint does not

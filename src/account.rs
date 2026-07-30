@@ -8,7 +8,12 @@ use crate::rate_limits::QuotaSnapshot;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AccountIdentity {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// Kept only so schema v2 caches remain readable until the next refresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub masked_email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_type: Option<String>,
 }
 
@@ -91,26 +96,30 @@ pub struct LoginChallenge {
     pub device_code: bool,
 }
 
-pub fn mask_email(email: &str) -> String {
-    let Some((local, domain)) = email.split_once('@') else {
-        return "已登录账号".to_owned();
-    };
-    let mut chars = local.chars();
-    let first = chars.next().unwrap_or('*');
-    let second = chars.next();
-    match second {
-        Some(second) => format!("{first}{second}***@{domain}"),
-        None => format!("{first}***@{domain}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::mask_email;
+    use super::AccountIdentity;
 
     #[test]
-    fn masks_email_without_using_it_as_identity() {
-        assert_eq!(mask_email("person@example.com"), "pe***@example.com");
-        assert_eq!(mask_email("x@example.com"), "x***@example.com");
+    fn reads_legacy_masked_email_cache_without_treating_it_as_full_email() {
+        let identity: AccountIdentity = serde_json::from_value(serde_json::json!({
+            "masked_email": "pe***@example.com",
+            "plan_type": "plus"
+        }))
+        .unwrap();
+        assert_eq!(identity.email, None);
+        assert_eq!(identity.masked_email.as_deref(), Some("pe***@example.com"));
+    }
+
+    #[test]
+    fn persists_full_email_for_account_card_display() {
+        let identity = AccountIdentity {
+            email: Some("person@example.com".to_owned()),
+            masked_email: None,
+            plan_type: Some("plus".to_owned()),
+        };
+        let value = serde_json::to_value(identity).unwrap();
+        assert_eq!(value["email"], "person@example.com");
+        assert!(value.get("masked_email").is_none());
     }
 }

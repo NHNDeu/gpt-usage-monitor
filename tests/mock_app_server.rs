@@ -63,8 +63,8 @@ async fn mock_server_handles_multiple_windows_and_optional_usage() {
     let mock = MockCommand::new("success");
     let result = mock.run(Duration::from_secs(2)).await.unwrap();
     assert_eq!(
-        result.identity.masked_email.as_deref(),
-        Some("fi***@example.com")
+        result.identity.email.as_deref(),
+        Some("fixture@example.com")
     );
     assert_eq!(result.quota.windows.len(), 2);
     assert_eq!(result.quota.windows[0].remaining_percent, 75.0);

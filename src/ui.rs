@@ -236,13 +236,19 @@ fn render_account_card(
 
             if let Some(cache) = &account.last_success {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(
-                        cache
-                            .identity
-                            .masked_email
-                            .as_deref()
-                            .unwrap_or("已登录 ChatGPT 账号"),
-                    );
+                    if let Some(email) = cache.identity.email.as_deref() {
+                        ui.label("邮箱账号：");
+                        ui.add(egui::Label::new(RichText::new(email).strong()).selectable(true));
+                        if ui.small_button("复制邮箱").clicked() {
+                            ui.ctx().copy_text(email.to_owned());
+                        }
+                    } else if let Some(masked) = cache.identity.masked_email.as_deref() {
+                        ui.label(format!("邮箱账号：{masked}（旧缓存，刷新后显示完整邮箱）"));
+                    } else {
+                        ui.label("邮箱账号：官方未提供");
+                    }
+                    ui.separator();
+                    ui.label("账号类型：ChatGPT");
                     ui.separator();
                     ui.label(format!(
                         "套餐：{}",

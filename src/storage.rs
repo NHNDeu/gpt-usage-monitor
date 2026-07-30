@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::account::AccountRecord;
 use crate::error::{AppError, Result};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -199,7 +199,7 @@ fn migrate(mut value: Value) -> Result<AppConfig> {
         )));
     }
 
-    if schema == 1 {
+    if schema < CURRENT_SCHEMA_VERSION as u64 {
         let object = value
             .as_object_mut()
             .ok_or_else(|| AppError::Storage("配置根节点不是对象".to_owned()))?;
@@ -207,9 +207,11 @@ fn migrate(mut value: Value) -> Result<AppConfig> {
             "schema_version".to_owned(),
             Value::from(CURRENT_SCHEMA_VERSION),
         );
-        object
-            .entry("settings")
-            .or_insert_with(|| serde_json::json!({}));
+        if schema == 1 {
+            object
+                .entry("settings")
+                .or_insert_with(|| serde_json::json!({}));
+        }
     }
 
     serde_json::from_value(value)
@@ -275,6 +277,17 @@ mod tests {
         assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
         assert!(config.settings.auto_refresh_on_start);
         assert!(config.accounts[0].enabled);
+    }
+
+    #[test]
+    fn migrates_schema_v2_for_full_email_cache_support() {
+        let value = serde_json::json!({
+            "schema_version": 2,
+            "settings": {},
+            "accounts": []
+        });
+        let config = migrate(value).unwrap();
+        assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
     }
 
     #[test]
