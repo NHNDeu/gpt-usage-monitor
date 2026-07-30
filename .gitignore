@@ -1,0 +1,22 @@
+/target/
+/dist/
+/.idea/
+/.vscode/
+/.DS_Store
+*.log
+*.tmp
+
+# Authentication and local application data must never be committed.
+auth.json
+**/auth.json
+.credentials.json
+**/.credentials.json
+/.codex/
+/.codex-accounts/
+/accounts/
+/local-data/
+/config.local.json
+
+# Generated platform packaging files.
+/assets/AppIcon.icns
+/assets/app.ico
