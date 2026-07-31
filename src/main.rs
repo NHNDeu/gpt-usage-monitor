@@ -12,6 +12,12 @@ fn main() -> eframe::Result {
         .with_min_inner_size([760.0, 520.0])
         .with_icon(platform::app_icon());
 
+    #[cfg(target_os = "macos")]
+    let viewport = viewport
+        .with_fullsize_content_view(true)
+        .with_title_shown(false)
+        .with_titlebar_shown(false);
+
     let options = eframe::NativeOptions {
         viewport,
         centered: true,

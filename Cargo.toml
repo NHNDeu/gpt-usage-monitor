@@ -1,6 +1,6 @@
 [package]
 name = "codex-usage-monitor"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.92"
 description = "A lightweight multi-account Codex quota monitor for macOS and Windows"

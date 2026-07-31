@@ -20,6 +20,8 @@ enum UiAction {
 pub fn render(app: &mut MonitorApp, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
     ui.style_mut().spacing.item_spacing = Vec2::new(8.0, 8.0);
 
+    render_native_titlebar_drag_region(ui);
+
     egui::Frame::NONE
         .inner_margin(egui::Margin::same(18))
         .show(ui, |ui| {
@@ -59,6 +61,20 @@ pub fn render(app: &mut MonitorApp, ui: &mut egui::Ui, _frame: &mut eframe::Fram
     render_login_dialogs(app, ui.ctx());
     render_settings(app, ui.ctx());
 }
+
+#[cfg(target_os = "macos")]
+fn render_native_titlebar_drag_region(ui: &mut egui::Ui) {
+    let response = ui.allocate_response(
+        Vec2::new(ui.available_width(), 24.0),
+        egui::Sense::click_and_drag(),
+    );
+    if response.drag_started() {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn render_native_titlebar_drag_region(_ui: &mut egui::Ui) {}
 
 fn render_header(app: &mut MonitorApp, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
@@ -686,29 +702,26 @@ fn render_settings(app: &mut MonitorApp, ctx: &egui::Context) {
             );
             ui.add_space(8.0);
             ui.heading("外观");
+            let mut theme_preference = app.config.settings.theme;
             egui::ComboBox::from_id_salt("theme-preference")
-                .selected_text(match app.config.settings.theme {
+                .selected_text(match theme_preference {
                     ThemePreference::System => "跟随系统",
                     ThemePreference::Light => "浅色",
                     ThemePreference::Dark => "深色",
                 })
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut app.config.settings.theme,
-                        ThemePreference::System,
-                        "跟随系统",
-                    );
-                    ui.selectable_value(
-                        &mut app.config.settings.theme,
-                        ThemePreference::Light,
-                        "浅色",
-                    );
-                    ui.selectable_value(
-                        &mut app.config.settings.theme,
-                        ThemePreference::Dark,
-                        "深色",
-                    );
+                    ui.selectable_value(&mut theme_preference, ThemePreference::System, "跟随系统");
+                    ui.selectable_value(&mut theme_preference, ThemePreference::Light, "浅色");
+                    ui.selectable_value(&mut theme_preference, ThemePreference::Dark, "深色");
                 });
+            if theme_preference != app.config.settings.theme {
+                app.set_theme_preference(theme_preference, ctx);
+            }
+            ui.label(
+                RichText::new("主题选择会立即生效并保存。")
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+            );
             ui.add_space(8.0);
             ui.heading("本地数据");
             if let Some(storage) = &app.storage {

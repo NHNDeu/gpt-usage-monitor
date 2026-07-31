@@ -14,6 +14,8 @@ Codex 使用比例、剩余比例和重置时间。
 
 界面基于 Rust stable、egui 0.35 和 eframe 0.35。macOS/Windows 使用同一套
 业务与 UI 代码，支持 Retina/高 DPI、深浅色主题、中文字体和本地时区显示。
+macOS 构建使用与系统一致的透明统一标题栏、原生交通灯按钮和可拖动标题栏区域；
+Windows 保留标准窗口装饰。
 
 ## 工作方式
 

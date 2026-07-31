@@ -400,13 +400,24 @@ impl MonitorApp {
         self.start_codex_detection(ctx.clone());
     }
 
+    pub(crate) fn set_theme_preference(
+        &mut self,
+        preference: ThemePreference,
+        ctx: &egui::Context,
+    ) {
+        if self.config.settings.theme == preference {
+            return;
+        }
+        self.config.settings.theme = preference;
+        self.apply_theme(ctx);
+        self.save_config();
+        ctx.request_repaint();
+    }
+
     pub(crate) fn apply_theme(&self, ctx: &egui::Context) {
-        let theme = match self.config.settings.theme {
-            ThemePreference::System => egui::ThemePreference::System,
-            ThemePreference::Light => egui::ThemePreference::Light,
-            ThemePreference::Dark => egui::ThemePreference::Dark,
-        };
-        ctx.set_theme(theme);
+        let (egui_theme, window_theme) = theme_preferences(self.config.settings.theme);
+        ctx.set_theme(egui_theme);
+        ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(window_theme));
     }
 
     pub(crate) fn save_config(&mut self) {
@@ -441,6 +452,17 @@ impl MonitorApp {
     }
 }
 
+fn theme_preferences(preference: ThemePreference) -> (egui::ThemePreference, egui::SystemTheme) {
+    match preference {
+        ThemePreference::System => (
+            egui::ThemePreference::System,
+            egui::SystemTheme::SystemDefault,
+        ),
+        ThemePreference::Light => (egui::ThemePreference::Light, egui::SystemTheme::Light),
+        ThemePreference::Dark => (egui::ThemePreference::Dark, egui::SystemTheme::Dark),
+    }
+}
+
 impl eframe::App for MonitorApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.process_events(ui.ctx());
@@ -453,5 +475,31 @@ impl eframe::App for MonitorApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.worker.shutdown();
         self.save_config();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::theme_preferences;
+    use crate::storage::ThemePreference;
+    use eframe::egui;
+
+    #[test]
+    fn maps_saved_theme_to_egui_and_native_window_themes() {
+        assert_eq!(
+            theme_preferences(ThemePreference::System),
+            (
+                egui::ThemePreference::System,
+                egui::SystemTheme::SystemDefault
+            )
+        );
+        assert_eq!(
+            theme_preferences(ThemePreference::Light),
+            (egui::ThemePreference::Light, egui::SystemTheme::Light)
+        );
+        assert_eq!(
+            theme_preferences(ThemePreference::Dark),
+            (egui::ThemePreference::Dark, egui::SystemTheme::Dark)
+        );
     }
 }
