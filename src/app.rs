@@ -472,15 +472,23 @@ impl eframe::App for MonitorApp {
         }
     }
 
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        clear_color_for_theme(visuals)
+    }
+
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.worker.shutdown();
         self.save_config();
     }
 }
 
+fn clear_color_for_theme(visuals: &egui::Visuals) -> [f32; 4] {
+    visuals.panel_fill.to_normalized_gamma_f32()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::theme_preferences;
+    use super::{clear_color_for_theme, theme_preferences};
     use crate::storage::ThemePreference;
     use eframe::egui;
 
@@ -501,5 +509,21 @@ mod tests {
             theme_preferences(ThemePreference::Dark),
             (egui::ThemePreference::Dark, egui::SystemTheme::Dark)
         );
+    }
+
+    #[test]
+    fn clear_color_follows_the_active_theme_background() {
+        let light = egui::Visuals::light();
+        let dark = egui::Visuals::dark();
+
+        assert_eq!(
+            clear_color_for_theme(&light),
+            light.panel_fill.to_normalized_gamma_f32()
+        );
+        assert_eq!(
+            clear_color_for_theme(&dark),
+            dark.panel_fill.to_normalized_gamma_f32()
+        );
+        assert_ne!(clear_color_for_theme(&light), clear_color_for_theme(&dark));
     }
 }

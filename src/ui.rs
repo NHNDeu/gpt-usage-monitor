@@ -20,11 +20,12 @@ enum UiAction {
 pub fn render(app: &mut MonitorApp, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
     ui.style_mut().spacing.item_spacing = Vec2::new(8.0, 8.0);
 
-    render_native_titlebar_drag_region(ui);
+    render_platform_header(app, ui);
 
     egui::Frame::NONE
         .inner_margin(egui::Margin::same(18))
         .show(ui, |ui| {
+            #[cfg(not(target_os = "macos"))]
             render_header(app, ui);
             render_codex_banner(app, ui);
             render_global_message(app, ui);
@@ -63,23 +64,45 @@ pub fn render(app: &mut MonitorApp, ui: &mut egui::Ui, _frame: &mut eframe::Fram
 }
 
 #[cfg(target_os = "macos")]
-fn render_native_titlebar_drag_region(ui: &mut egui::Ui) {
-    let response = ui.allocate_response(
-        Vec2::new(ui.available_width(), 24.0),
-        egui::Sense::click_and_drag(),
-    );
-    if response.drag_started() {
-        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-    }
+fn render_platform_header(app: &mut MonitorApp, ui: &mut egui::Ui) {
+    let fill = if ui.visuals().dark_mode {
+        Color32::from_rgb(36, 36, 39)
+    } else {
+        Color32::from_rgb(237, 237, 240)
+    };
+    egui::Frame::NONE
+        .fill(fill)
+        .inner_margin(egui::Margin {
+            left: 18,
+            right: 18,
+            top: 0,
+            bottom: 12,
+        })
+        .show(ui, |ui| {
+            let response = ui.allocate_response(
+                Vec2::new(ui.available_width(), 24.0),
+                egui::Sense::click_and_drag(),
+            );
+            if response.drag_started() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+            render_header(app, ui);
+        });
+    ui.separator();
 }
 
 #[cfg(not(target_os = "macos"))]
-fn render_native_titlebar_drag_region(_ui: &mut egui::Ui) {}
+fn render_platform_header(_app: &mut MonitorApp, _ui: &mut egui::Ui) {}
 
 fn render_header(app: &mut MonitorApp, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
-            ui.label(RichText::new("Codex 额度监控").size(25.0).strong());
+            let title_size = if cfg!(target_os = "macos") {
+                21.0
+            } else {
+                25.0
+            };
+            ui.label(RichText::new("Codex 额度监控").size(title_size).strong());
             ui.label(
                 RichText::new("统一查看多个 ChatGPT 账号的官方 Codex 限额")
                     .size(13.0)
