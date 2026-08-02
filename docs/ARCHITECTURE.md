@@ -18,6 +18,14 @@ worker coordinator ── one account at a time for Refresh All
   │    ├─ account/rateLimits/read
   │    └─ account/usage/read (optional)
   └─ close stdin → wait → kill owned child on timeout
+
+optional desktop switch transaction (explicit opt-in)
+  ├─ parse only identity fields from target/global auth.json
+  ├─ target account/read → stop verified Codex desktop host
+  ├─ recovery backup → safe managed-account save-back
+  ├─ same-directory atomic replace of global auth.json
+  ├─ restart only if the host was running before the switch
+  └─ global account/read → commit, or stop host and roll back
 ```
 
 ## Modules
@@ -39,6 +47,10 @@ worker coordinator ── one account at a time for Refresh All
 - `storage` owns schema-versioned JSON configuration and account directories.
 - `logging` keeps a capped, rotated, redacted diagnostic log.
 - `platform` installs a CJK system font, window icon, and panic hook.
+- `account_switch` owns credential identity extraction, managed-account matching,
+  restricted recovery backups, same-directory atomic replacement, and rollback.
+- `desktop_host` owns conservative macOS/Windows host identity checks, graceful
+  quit, bounded PID-specific termination, captured App Server cleanup, and restart.
 
 ## Account isolation
 
@@ -47,8 +59,30 @@ standard application data directory. Only that child process receives the
 corresponding `CODEX_HOME`; global environment variables are not changed.
 The child is also launched with
 `cli_auth_credentials_store="file"` so Codex stores the managed ChatGPT login
-inside that isolated home. The monitor does not parse or copy `auth.json`.
-Directories are mode `0700` and configuration files mode `0600` on Unix.
+inside that isolated home. The default quota path does not parse or copy
+`auth.json`. The optional desktop switch path reads only the identity-bearing
+structure required to prevent cross-account writes, copies the file locally,
+and never exposes token values. Directories are mode `0700` and configuration or
+credential files mode `0600` on Unix.
+
+## Desktop account switch invariant
+
+The current global credential is never assigned from a selection cache or a
+display name. `tokens.account_id` or the ID-token ChatGPT account claim is the
+primary key. A complete email is considered only when the token marks it as
+verified. A match must be unique; ambiguous or unknown credentials are backed
+up but never written into a managed account home.
+
+The worker admits exactly one desktop operation and blocks refresh, login,
+logout, delete, and another switch for the duration. Cancellation is honored
+while validating the target. Once host shutdown begins, the transaction runs to
+commit or rollback and application exit joins that worker.
+
+macOS checks the enclosing app's `Info.plist`, accepts `com.openai.codex`, and
+excludes `com.openai.chat`. Windows requires a candidate process name plus
+verified install-path/package or embedded-CLI evidence. Any forced termination
+addresses a revalidated PID; there is no `killall ChatGPT` or name-wide
+`taskkill` path.
 
 ## Login flow
 
@@ -81,9 +115,11 @@ discard valid quota data.
 
 ## Process exit guarantees
 
-The application retains the `tokio::process::Child` handle; it never searches
-for processes by name. Normal completion closes stdin and waits briefly.
-Timeout or cancellation kills only that owned child. `kill_on_drop` is the
-last-resort guard. Closing the window cancels every token and joins worker
-threads before the process exits. No tray process, daemon, scheduler, or
-periodic task is created.
+For normal account operations the application retains the
+`tokio::process::Child` handle and never searches for a process by name. Normal
+completion closes stdin and waits briefly; timeout or cancellation kills only
+that owned child. The optional desktop switch enumerates host candidates, but a
+name is never sufficient: bundle/package/path identity is revalidated before a
+PID-specific signal. `kill_on_drop` is the last-resort guard. Closing the window
+cancels every token and joins worker threads before the process exits. No tray
+process, daemon, scheduler, or periodic task is created.

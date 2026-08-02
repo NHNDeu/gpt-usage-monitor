@@ -63,6 +63,7 @@ input.on("line", (line) => {
         result: {
           account: {
             type: "chatgpt",
+            chatgptAccountId: "acct-fixture",
             email: "fixture@example.com",
             planType: "plus",
             unknownFutureField: 1,

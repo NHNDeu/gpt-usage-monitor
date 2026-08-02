@@ -66,6 +66,7 @@ async fn mock_server_handles_multiple_windows_and_optional_usage() {
         result.identity.email.as_deref(),
         Some("fixture@example.com")
     );
+    assert_eq!(result.identity.account_id.as_deref(), Some("acct-fixture"));
     assert_eq!(result.quota.windows.len(), 2);
     assert_eq!(result.quota.windows[0].remaining_percent, 75.0);
     assert_eq!(

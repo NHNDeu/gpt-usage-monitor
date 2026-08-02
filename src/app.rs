@@ -7,16 +7,27 @@ use eframe::egui;
 use uuid::Uuid;
 
 use crate::account::{AccountRuntime, AccountStatus};
+use crate::account_switch::{CredentialOwner, default_global_codex_home};
 use crate::codex_locator::CodexInstallation;
 use crate::error::AppError;
 use crate::storage::{AppConfig, Storage, ThemePreference};
-use crate::worker::{FailureCategory, WorkerEvent, WorkerManager};
+use crate::worker::{FailureCategory, OperationKind, WorkerEvent, WorkerManager};
 
 #[derive(Debug)]
 pub enum CodexState {
     Detecting,
     Available(CodexInstallation),
     Unavailable { summary: String, diagnostic: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DesktopAccountState {
+    Disabled,
+    Checking,
+    Managed(Uuid),
+    Unmanaged,
+    Missing,
+    Error(String),
 }
 
 #[derive(Debug, Default)]
@@ -50,7 +61,10 @@ pub struct MonitorApp {
     pub(crate) delete_dialog: Option<DeleteDialog>,
     pub(crate) show_settings: bool,
     pub(crate) settings_path_buffer: String,
+    pub(crate) desktop_home_buffer: String,
+    pub(crate) desktop_account_state: DesktopAccountState,
     auto_refresh_pending: bool,
+    desktop_inspection_pending: bool,
 }
 
 impl MonitorApp {
@@ -78,6 +92,17 @@ impl MonitorApp {
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let desktop_home_buffer = config
+            .settings
+            .desktop_codex_home
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let desktop_account_state = if config.settings.desktop_switch_enabled {
+            DesktopAccountState::Checking
+        } else {
+            DesktopAccountState::Disabled
+        };
         let runtimes = config
             .accounts
             .iter()
@@ -100,7 +125,10 @@ impl MonitorApp {
             delete_dialog: None,
             show_settings: false,
             settings_path_buffer,
+            desktop_home_buffer,
+            desktop_account_state,
             auto_refresh_pending,
+            desktop_inspection_pending: false,
         };
         app.apply_theme(&cc.egui_ctx);
         app.start_codex_detection(cc.egui_ctx.clone());
@@ -118,6 +146,10 @@ impl MonitorApp {
                     ));
                     self.codex_state = CodexState::Available(installation);
                     self.global_diagnostic = None;
+                    if self.config.settings.desktop_switch_enabled {
+                        self.desktop_inspection_pending = true;
+                        self.desktop_account_state = DesktopAccountState::Checking;
+                    }
                 }
                 WorkerEvent::CodexDetected(Err(failure)) => {
                     self.codex_state = CodexState::Unavailable {
@@ -131,7 +163,9 @@ impl MonitorApp {
                     operation,
                     step,
                 } => {
-                    let _ = operation;
+                    if matches!(operation, OperationKind::SwitchDesktopAccount) {
+                        self.desktop_account_state = DesktopAccountState::Checking;
+                    }
                     let runtime = self.runtimes.entry(account_id).or_default();
                     runtime.status = AccountStatus::Querying(step);
                     runtime.error_summary = None;
@@ -170,6 +204,9 @@ impl MonitorApp {
                     runtime.diagnostic = None;
                     runtime.login_challenge = None;
                     self.last_global_refresh = Some(Utc::now());
+                    if self.config.settings.desktop_switch_enabled {
+                        self.desktop_inspection_pending = true;
+                    }
                     self.save_config();
                 }
                 WorkerEvent::LogoutFinished { account_id } => {
@@ -186,6 +223,82 @@ impl MonitorApp {
                     runtime.login_challenge = None;
                     runtime.error_summary = None;
                     runtime.diagnostic = None;
+                    if self.config.settings.desktop_switch_enabled {
+                        self.desktop_inspection_pending = true;
+                    }
+                    self.save_config();
+                }
+                WorkerEvent::DesktopInspected {
+                    inspection,
+                    verified_identity,
+                } => {
+                    self.desktop_account_state = match inspection.owner {
+                        CredentialOwner::Managed(id) => DesktopAccountState::Managed(id),
+                        CredentialOwner::Unmanaged | CredentialOwner::Ambiguous => {
+                            DesktopAccountState::Unmanaged
+                        }
+                        CredentialOwner::Missing => DesktopAccountState::Missing,
+                    };
+                    self.config.last_active_desktop_account_id = match inspection.owner {
+                        CredentialOwner::Managed(id) => Some(id),
+                        _ => None,
+                    };
+                    if let (CredentialOwner::Managed(id), Some(identity)) =
+                        (inspection.owner, verified_identity)
+                        && let Some(cache) = self
+                            .config
+                            .accounts
+                            .iter_mut()
+                            .find(|account| account.id == id)
+                            .and_then(|account| account.last_success.as_mut())
+                    {
+                        cache.identity = identity;
+                    }
+                    self.save_config();
+                }
+                WorkerEvent::DesktopSwitchFinished {
+                    account_id,
+                    identity,
+                    recovery_path,
+                    already_active,
+                    warning,
+                } => {
+                    self.desktop_account_state = DesktopAccountState::Managed(account_id);
+                    self.config.last_active_desktop_account_id = Some(account_id);
+                    if let Some(account) = self
+                        .config
+                        .accounts
+                        .iter_mut()
+                        .find(|account| account.id == account_id)
+                        && let Some(cache) = &mut account.last_success
+                    {
+                        cache.identity = identity;
+                    }
+                    let runtime = self.runtimes.entry(account_id).or_default();
+                    runtime.status = AccountStatus::Success;
+                    runtime.error_summary = warning.clone();
+                    runtime.diagnostic = recovery_path
+                        .as_ref()
+                        .map(|path| format!("恢复副本：{}", path.display()));
+                    let account = self
+                        .config
+                        .accounts
+                        .iter()
+                        .find(|account| account.id == account_id);
+                    let name = account
+                        .map(|account| account.display_name.as_str())
+                        .unwrap_or("账号");
+                    let email = account
+                        .and_then(|account| account.last_success.as_ref())
+                        .and_then(|cache| cache.identity.email.as_deref())
+                        .unwrap_or("官方未提供邮箱");
+                    self.global_message = Some(if already_active {
+                        format!("当前已是该账号：{name}\n{email}")
+                    } else if let Some(warning) = warning {
+                        format!("已将桌面应用切换到：{name}\n{email}\n⚠ {warning}")
+                    } else {
+                        format!("已将桌面应用切换到：{name}\n{email}")
+                    });
                     self.save_config();
                 }
                 WorkerEvent::Failed {
@@ -193,7 +306,18 @@ impl MonitorApp {
                     operation,
                     failure,
                 } => {
-                    let _ = operation;
+                    if matches!(operation, OperationKind::InspectDesktopAccount) {
+                        self.desktop_account_state = DesktopAccountState::Error(failure.summary);
+                        self.desktop_inspection_pending = false;
+                        continue;
+                    }
+                    if matches!(operation, OperationKind::SwitchDesktopAccount) {
+                        self.desktop_account_state = DesktopAccountState::Error(
+                            "切换失败，当前桌面账号需要重新验证".to_owned(),
+                        );
+                        self.global_message = Some(failure.summary.clone());
+                        self.global_diagnostic = Some(failure.diagnostic.clone());
+                    }
                     if let Some(account) = self
                         .config
                         .accounts
@@ -223,7 +347,13 @@ impl MonitorApp {
             }
         }
 
-        if self.auto_refresh_pending
+        if self.desktop_inspection_pending
+            && matches!(self.codex_state, CodexState::Available(_))
+            && !self.worker.any_active()
+        {
+            self.desktop_inspection_pending = false;
+            self.start_desktop_inspection(ctx.clone());
+        } else if self.auto_refresh_pending
             && matches!(self.codex_state, CodexState::Available(_))
             && !self.worker.any_active()
         {
@@ -239,6 +369,9 @@ impl MonitorApp {
     }
 
     pub(crate) fn refresh_all(&mut self, ctx: egui::Context) {
+        if self.worker.any_active() {
+            return;
+        }
         let Some(path) = self.codex_path() else {
             self.global_message = Some("Codex 不可用，无法刷新账号".to_owned());
             return;
@@ -309,10 +442,18 @@ impl MonitorApp {
     }
 
     pub(crate) fn add_account(&mut self, name: String, device_code: bool, ctx: egui::Context) {
+        if self.worker.any_active() {
+            self.global_message = Some("请等待当前账号操作完成".to_owned());
+            return;
+        }
         let Some(storage) = &self.storage else {
             self.global_message = Some("本地数据目录不可用，无法添加账号".to_owned());
             return;
         };
+        if let Err(error) = storage.validate_managed_accounts(&self.config.accounts) {
+            self.set_global_error(error);
+            return;
+        }
         let display_name = if name.trim().is_empty() {
             format!("账号 {}", self.config.accounts.len() + 1)
         } else {
@@ -332,6 +473,10 @@ impl MonitorApp {
     }
 
     pub(crate) fn rename_account(&mut self, id: Uuid, name: String) {
+        if self.worker.any_active() {
+            self.global_message = Some("请等待当前账号操作完成".to_owned());
+            return;
+        }
         if let Some(account) = self
             .config
             .accounts
@@ -348,6 +493,10 @@ impl MonitorApp {
     }
 
     pub(crate) fn set_account_enabled(&mut self, id: Uuid, enabled: bool) {
+        if self.worker.any_active() {
+            self.global_message = Some("请等待当前账号操作完成".to_owned());
+            return;
+        }
         if let Some(account) = self
             .config
             .accounts
@@ -360,8 +509,8 @@ impl MonitorApp {
     }
 
     pub(crate) fn delete_account(&mut self, id: Uuid, delete_credentials: bool) {
-        if self.worker.is_active(id) {
-            self.global_message = Some("请先取消该账号正在进行的操作".to_owned());
+        if self.worker.any_active() {
+            self.global_message = Some("请等待当前账号操作完成".to_owned());
             return;
         }
         let Some(index) = self
@@ -383,18 +532,34 @@ impl MonitorApp {
         }
         self.config.accounts.remove(index);
         self.runtimes.remove(&id);
+        if self.config.last_active_desktop_account_id == Some(id) {
+            self.config.last_active_desktop_account_id = None;
+            self.desktop_account_state = DesktopAccountState::Unmanaged;
+        }
         self.reindex_accounts();
         self.save_config();
         self.delete_dialog = None;
     }
 
     pub(crate) fn apply_settings(&mut self, ctx: &egui::Context) {
+        if self.worker.any_active() {
+            self.global_message = Some("请等待当前账号操作完成后再保存设置".to_owned());
+            return;
+        }
         self.config.settings.custom_codex_path = (!self.settings_path_buffer.trim().is_empty())
             .then(|| PathBuf::from(self.settings_path_buffer.trim()));
+        self.config.settings.desktop_codex_home = (!self.desktop_home_buffer.trim().is_empty())
+            .then(|| PathBuf::from(self.desktop_home_buffer.trim()));
         self.config.settings.request_timeout_seconds =
             self.config.settings.request_timeout_seconds.clamp(5, 120);
         self.config.settings.stale_after_minutes =
             self.config.settings.stale_after_minutes.clamp(1, 1_440);
+        if self.config.settings.desktop_switch_enabled {
+            self.desktop_account_state = DesktopAccountState::Checking;
+        } else {
+            self.desktop_account_state = DesktopAccountState::Disabled;
+            self.config.last_active_desktop_account_id = None;
+        }
         self.save_config();
         self.apply_theme(ctx);
         self.start_codex_detection(ctx.clone());
@@ -425,6 +590,101 @@ impl MonitorApp {
             && let Err(error) = storage.save(&self.config)
         {
             self.set_global_error(error);
+        }
+    }
+
+    pub(crate) fn begin_desktop_switch(&mut self, id: Uuid, ctx: egui::Context) {
+        if !self.config.settings.desktop_switch_enabled {
+            self.global_message = Some("请先在设置中启用桌面账号切换".to_owned());
+            return;
+        }
+        if self.worker.any_active() {
+            self.global_message = Some("请等待当前账号操作完成".to_owned());
+            return;
+        }
+        let Some(codex_path) = self.codex_path() else {
+            self.global_message = Some("Codex 不可用，无法切换桌面账号".to_owned());
+            return;
+        };
+        let Some(target) = self
+            .config
+            .accounts
+            .iter()
+            .find(|account| account.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(storage) = &self.storage else {
+            self.global_message = Some("本地数据目录不可用，无法创建恢复副本".to_owned());
+            return;
+        };
+        if let Err(error) = storage.validate_managed_accounts(&self.config.accounts) {
+            self.set_global_error(error);
+            return;
+        }
+        if let Err(error) = storage.ensure_account_home(&target) {
+            self.set_global_error(error);
+            return;
+        }
+        let global_home = match self.desktop_codex_home() {
+            Ok(path) => path,
+            Err(error) => {
+                self.set_global_error(error);
+                return;
+            }
+        };
+        let started = self.worker.switch_desktop_account(
+            target,
+            self.config.accounts.clone(),
+            codex_path,
+            global_home,
+            storage.recovery_root().to_owned(),
+            self.request_timeout(),
+            ctx,
+        );
+        if !started {
+            self.global_message = Some("已有账号操作正在进行".to_owned());
+        }
+    }
+
+    fn start_desktop_inspection(&mut self, ctx: egui::Context) {
+        if !self.config.settings.desktop_switch_enabled {
+            return;
+        }
+        let Some(codex_path) = self.codex_path() else {
+            return;
+        };
+        if let Some(storage) = &self.storage
+            && let Err(error) = storage.validate_managed_accounts(&self.config.accounts)
+        {
+            self.set_global_error(error);
+            return;
+        }
+        let global_home = match self.desktop_codex_home() {
+            Ok(path) => path,
+            Err(error) => {
+                self.set_global_error(error);
+                return;
+            }
+        };
+        self.desktop_account_state = DesktopAccountState::Checking;
+        self.worker.inspect_desktop_account(
+            self.config.accounts.clone(),
+            codex_path,
+            global_home,
+            self.request_timeout(),
+            ctx,
+        );
+    }
+
+    pub(crate) fn desktop_codex_home(&self) -> crate::error::Result<PathBuf> {
+        match &self.config.settings.desktop_codex_home {
+            Some(path) if path.is_absolute() => Ok(path.clone()),
+            Some(_) => Err(AppError::DesktopSwitch(
+                "自定义全局 Codex Home 必须填写绝对路径".to_owned(),
+            )),
+            None => default_global_codex_home(),
         }
     }
 

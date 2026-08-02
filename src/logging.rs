@@ -49,7 +49,11 @@ pub fn redact(input: &str) -> String {
         let lower = token.to_ascii_lowercase();
         let sensitive = lower.contains("access_token")
             || lower.contains("refresh_token")
+            || lower.contains("id_token")
+            || lower.contains("auth_url")
             || lower.contains("authorization:")
+            || lower.starts_with("https://")
+            || lower.starts_with("http://")
             || lower.starts_with("bearer")
             || lower.starts_with("sk-")
             || (token.matches('.').count() == 2 && token.len() > 40);
@@ -79,8 +83,12 @@ mod tests {
 
     #[test]
     fn redacts_tokens_and_email() {
-        let text = redact("user@example.com access_token=secret sk-secret");
+        let text = redact(
+            "user@example.com access_token=secret id_token=opaque sk-secret https://auth.openai.com/authorize?code=secret",
+        );
         assert!(text.contains("u***@example.com"));
         assert!(!text.contains("secret"));
+        assert!(!text.contains("opaque"));
+        assert!(!text.contains("authorize"));
     }
 }

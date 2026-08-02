@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::account::AccountRecord;
 use crate::error::{AppError, Result};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -33,6 +33,10 @@ pub struct AppSettings {
     pub stale_after_minutes: i64,
     #[serde(default)]
     pub theme: ThemePreference,
+    #[serde(default)]
+    pub desktop_switch_enabled: bool,
+    #[serde(default)]
+    pub desktop_codex_home: Option<PathBuf>,
 }
 
 impl Default for AppSettings {
@@ -43,6 +47,8 @@ impl Default for AppSettings {
             request_timeout_seconds: default_request_timeout(),
             stale_after_minutes: default_stale_minutes(),
             theme: ThemePreference::System,
+            desktop_switch_enabled: false,
+            desktop_codex_home: None,
         }
     }
 }
@@ -54,6 +60,9 @@ pub struct AppConfig {
     pub settings: AppSettings,
     #[serde(default)]
     pub accounts: Vec<AccountRecord>,
+    /// UI cache only; never used to decide credential ownership.
+    #[serde(default)]
+    pub last_active_desktop_account_id: Option<Uuid>,
 }
 
 impl Default for AppConfig {
@@ -62,6 +71,7 @@ impl Default for AppConfig {
             schema_version: CURRENT_SCHEMA_VERSION,
             settings: AppSettings::default(),
             accounts: Vec::new(),
+            last_active_desktop_account_id: None,
         }
     }
 }
@@ -72,6 +82,7 @@ pub struct Storage {
     config_path: PathBuf,
     accounts_root: PathBuf,
     logs_root: PathBuf,
+    recovery_root: PathBuf,
 }
 
 impl Storage {
@@ -84,6 +95,7 @@ impl Storage {
     pub fn at(root: PathBuf) -> Result<Self> {
         let accounts_root = root.join("accounts");
         let logs_root = root.join("logs");
+        let recovery_root = root.join("desktop-auth-recovery");
         fs::create_dir_all(&accounts_root)?;
         fs::create_dir_all(&logs_root)?;
         set_directory_private(&root)?;
@@ -94,11 +106,16 @@ impl Storage {
             root,
             accounts_root,
             logs_root,
+            recovery_root,
         })
     }
 
     pub fn logs_root(&self) -> &Path {
         &self.logs_root
+    }
+
+    pub fn recovery_root(&self) -> &Path {
+        &self.recovery_root
     }
 
     pub fn load_or_default(&self) -> (AppConfig, Option<String>) {
@@ -170,6 +187,19 @@ impl Storage {
         }
         fs::create_dir_all(&expected)?;
         set_directory_private(&expected)
+    }
+
+    pub fn validate_managed_accounts(&self, accounts: &[AccountRecord]) -> Result<()> {
+        if let Some(account) = accounts
+            .iter()
+            .find(|account| account.state_dir != self.expected_account_home(account.id))
+        {
+            return Err(AppError::Storage(format!(
+                "账号目录不在受管数据目录中：{}",
+                account.state_dir.display()
+            )));
+        }
+        Ok(())
     }
 
     pub fn delete_account_home(&self, account: &AccountRecord) -> Result<()> {
@@ -280,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn migrates_schema_v2_for_full_email_cache_support() {
+    fn migrates_schema_v2_for_desktop_switch_defaults() {
         let value = serde_json::json!({
             "schema_version": 2,
             "settings": {},
@@ -288,6 +318,9 @@ mod tests {
         });
         let config = migrate(value).unwrap();
         assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
+        assert!(!config.settings.desktop_switch_enabled);
+        assert!(config.settings.desktop_codex_home.is_none());
+        assert!(config.last_active_desktop_account_id.is_none());
     }
 
     #[test]

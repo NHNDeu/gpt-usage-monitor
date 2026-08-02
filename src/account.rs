@@ -9,6 +9,8 @@ use crate::rate_limits::QuotaSnapshot;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AccountIdentity {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
     /// Kept only so schema v2 caches remain readable until the next refresh.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -114,12 +116,14 @@ mod tests {
     #[test]
     fn persists_full_email_for_account_card_display() {
         let identity = AccountIdentity {
+            account_id: Some("acct_fixture".to_owned()),
             email: Some("person@example.com".to_owned()),
             masked_email: None,
             plan_type: Some("plus".to_owned()),
         };
         let value = serde_json::to_value(identity).unwrap();
         assert_eq!(value["email"], "person@example.com");
+        assert_eq!(value["account_id"], "acct_fixture");
         assert!(value.get("masked_email").is_none());
     }
 }

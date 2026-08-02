@@ -117,10 +117,7 @@ impl AppServerProcess {
     }
 
     pub async fn query_account(&mut self, cancel: &CancellationToken) -> Result<CachedAccountData> {
-        let account_result = self
-            .request("account/read", Some(json!({"refreshToken": false})), cancel)
-            .await?;
-        let identity = parse_account_identity(&account_result)?;
+        let identity = self.query_identity(cancel).await?;
         let rate_result = self
             .request("account/rateLimits/read", None, cancel)
             .await?;
@@ -135,6 +132,13 @@ impl AppServerProcess {
         }
 
         Ok(CachedAccountData { identity, quota })
+    }
+
+    pub async fn query_identity(&mut self, cancel: &CancellationToken) -> Result<AccountIdentity> {
+        let account_result = self
+            .request("account/read", Some(json!({"refreshToken": false})), cancel)
+            .await?;
+        parse_account_identity(&account_result)
     }
 
     pub async fn start_login(
@@ -385,6 +389,12 @@ fn parse_account_identity(result: &Value) -> Result<AccountIdentity> {
         ));
     }
     Ok(AccountIdentity {
+        account_id: ["accountId", "chatgptAccountId", "id"]
+            .into_iter()
+            .find_map(|field| account.get(field).and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned),
         email: account
             .get("email")
             .and_then(Value::as_str)
@@ -509,6 +519,19 @@ pub async fn run_query(
     result.map_err(|error| append_process_diagnostic(error, diagnostic))
 }
 
+pub async fn run_identity_query(
+    codex_path: PathBuf,
+    codex_home: PathBuf,
+    request_timeout: Duration,
+    cancel: CancellationToken,
+) -> Result<AccountIdentity> {
+    let mut server = AppServerProcess::spawn(&codex_path, &codex_home, request_timeout).await?;
+    let result = server.query_identity(&cancel).await;
+    let diagnostic = server.diagnostics();
+    server.shutdown().await;
+    result.map_err(|error| append_process_diagnostic(error, diagnostic))
+}
+
 fn append_process_diagnostic(error: AppError, diagnostic: String) -> AppError {
     if diagnostic.is_empty() {
         return error;
@@ -533,6 +556,7 @@ mod tests {
         let result = parse_account_identity(&json!({
             "account": {
                 "type": "chatgpt",
+                "chatgptAccountId": "acct_fixture",
                 "email": "someone@example.com",
                 "planType": "plus",
                 "future": true
@@ -541,6 +565,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(result.email.as_deref(), Some("someone@example.com"));
+        assert_eq!(result.account_id.as_deref(), Some("acct_fixture"));
         assert_eq!(result.masked_email, None);
     }
 

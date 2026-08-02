@@ -63,6 +63,14 @@ fn main() {
         return;
     }
 
+    // Allows `cargo check` of Windows-only Rust code from a non-Windows host
+    // without pretending that the native resource/toolchain boundary passed.
+    // Native CI never sets this variable and still compiles the real icon/resource.
+    if env::var("CODEX_MONITOR_SKIP_WINDOWS_RESOURCE").as_deref() == Ok("1") {
+        println!("cargo:warning=skipping Windows resources for non-native cargo check");
+        return;
+    }
+
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));
     let icon_path = out_dir.join("codex-usage-monitor.ico");
     let image = ico::IconImage::from_rgba_data(256, 256, icon_rgba(256));

@@ -22,6 +22,8 @@ pub enum AppError {
     InvalidResponse(String),
     #[error("本地数据错误：{0}")]
     Storage(String),
+    #[error("桌面账号切换失败：{0}")]
+    DesktopSwitch(String),
     #[error("系统错误：{0}")]
     Io(#[from] io::Error),
 }
@@ -38,6 +40,7 @@ impl AppError {
             Self::ProcessExited(_) => "Codex App Server 意外退出",
             Self::InvalidResponse(_) => "Codex 返回了无法识别的数据",
             Self::Storage(_) => "无法读取或保存本地数据",
+            Self::DesktopSwitch(_) => "无法安全切换桌面应用账号",
             Self::Io(_) => "本地系统操作失败",
         }
     }

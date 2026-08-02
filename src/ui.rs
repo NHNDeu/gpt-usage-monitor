@@ -3,7 +3,9 @@ use eframe::egui::{self, Color32, RichText, Stroke, Vec2};
 use uuid::Uuid;
 
 use crate::account::{AccountRecord, AccountRuntime, AccountStatus};
-use crate::app::{AddDialog, CodexState, DeleteDialog, EditDialog, MonitorApp};
+use crate::app::{
+    AddDialog, CodexState, DeleteDialog, DesktopAccountState, EditDialog, MonitorApp,
+};
 use crate::rate_limits::{QuotaSnapshot, QuotaWindow};
 use crate::storage::ThemePreference;
 
@@ -15,6 +17,7 @@ enum UiAction {
     Rename(Uuid, String),
     Delete(Uuid),
     SetEnabled(Uuid, bool),
+    SwitchDesktop(Uuid),
 }
 
 pub fn render(app: &mut MonitorApp, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -110,10 +113,16 @@ fn render_header(app: &mut MonitorApp, ui: &mut egui::Ui) {
             );
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("⚙ 设置").clicked() {
+            if ui
+                .add_enabled(!app.worker.any_active(), egui::Button::new("⚙ 设置"))
+                .clicked()
+            {
                 app.show_settings = true;
             }
-            if ui.button("＋ 添加账号").clicked() {
+            if ui
+                .add_enabled(!app.worker.any_active(), egui::Button::new("＋ 添加账号"))
+                .clicked()
+            {
                 app.add_dialog = Some(AddDialog::default());
             }
             let can_refresh = matches!(app.codex_state, CodexState::Available(_))
@@ -125,10 +134,11 @@ fn render_header(app: &mut MonitorApp, ui: &mut egui::Ui) {
             {
                 app.refresh_all(ui.ctx().clone());
             }
-            if app.worker.any_active() && ui.button("■ 取消全部").clicked() {
-                for account in &app.config.accounts {
-                    app.worker.cancel(account.id);
-                }
+            if app.worker.any_active()
+                && !app.worker.desktop_switch_active()
+                && ui.button("■ 取消全部").clicked()
+            {
+                app.worker.cancel_all();
             }
         });
     });
@@ -140,7 +150,10 @@ fn render_header(app: &mut MonitorApp, ui: &mut egui::Ui) {
             .iter()
             .filter(|account| app.worker.is_active(account.id))
             .count();
-        if progress > 0 {
+        if app.worker.desktop_switch_active() {
+            ui.spinner();
+            ui.label("正在安全切换桌面应用账号（凭据替换阶段不可取消）");
+        } else if progress > 0 {
             ui.spinner();
             ui.label(format!("正在处理 {progress} 个账号（刷新全部时依次查询）"));
         } else if let Some(time) = app.last_global_refresh {
@@ -184,6 +197,35 @@ fn render_codex_banner(app: &mut MonitorApp, ui: &mut egui::Ui) {
                     ui.label(&installation.version);
                     ui.separator();
                     ui.label(installation.path.display().to_string());
+                    if app.config.settings.desktop_switch_enabled {
+                        ui.separator();
+                        match &app.desktop_account_state {
+                            DesktopAccountState::Managed(id) => {
+                                let name = app
+                                    .config
+                                    .accounts
+                                    .iter()
+                                    .find(|account| account.id == *id)
+                                    .map(|account| account.display_name.as_str())
+                                    .unwrap_or("已管理账号");
+                                ui.label(format!("桌面账号：{name}"));
+                            }
+                            DesktopAccountState::Checking => {
+                                ui.spinner();
+                                ui.label("正在验证桌面账号");
+                            }
+                            DesktopAccountState::Unmanaged => {
+                                ui.label("⚠ 桌面账号未受本应用管理");
+                            }
+                            DesktopAccountState::Missing => {
+                                ui.label("桌面应用尚未登录");
+                            }
+                            DesktopAccountState::Error(summary) => {
+                                ui.label(format!("⚠ 桌面账号验证失败：{summary}"));
+                            }
+                            DesktopAccountState::Disabled => {}
+                        }
+                    }
                 }
                 CodexState::Unavailable {
                     summary,
@@ -265,6 +307,16 @@ fn render_account_card(
                 if !account.enabled {
                     ui.label(RichText::new("已停用").color(ui.visuals().weak_text_color()));
                 }
+                if matches!(
+                    app.desktop_account_state,
+                    DesktopAccountState::Managed(id) if id == account.id
+                ) {
+                    ui.label(
+                        RichText::new("当前桌面账号")
+                            .strong()
+                            .color(Color32::from_rgb(65, 175, 115)),
+                    );
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let mut enabled = account.enabled;
                     if ui.checkbox(&mut enabled, "启用").changed() {
@@ -339,10 +391,17 @@ fn render_account_card(
             ui.add_space(8.0);
             ui.horizontal_wrapped(|ui| {
                 let active = app.worker.is_active(account.id);
+                let globally_busy = app.worker.any_active();
                 if active {
                     if ui.button("■ 取消").clicked() {
                         action = Some(UiAction::Cancel(account.id));
                     }
+                } else if globally_busy {
+                    ui.label(
+                        RichText::new("其他账号操作进行中，账号操作已锁定")
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
+                    );
                 } else {
                     if ui
                         .add_enabled(
@@ -366,6 +425,32 @@ fn render_account_card(
                     }
                     if ui.button("退出登录").clicked() {
                         action = Some(UiAction::Logout(account.id));
+                    }
+                    let already_desktop = matches!(
+                        app.desktop_account_state,
+                        DesktopAccountState::Managed(id) if id == account.id
+                    );
+                    let switch_ready = app.config.settings.desktop_switch_enabled
+                        && account.last_success.is_some()
+                        && has_ordinary_auth_file(account);
+                    let switch_label = if already_desktop {
+                        "当前已是该账号"
+                    } else {
+                        "切换到桌面应用"
+                    };
+                    if ui
+                        .add_enabled(
+                            switch_ready && !already_desktop,
+                            egui::Button::new(switch_label),
+                        )
+                        .on_hover_text(if app.config.settings.desktop_switch_enabled {
+                            "将安全关闭 Codex 桌面宿主、切换本机凭据并验证账号"
+                        } else {
+                            "请先在设置中启用桌面账号切换"
+                        })
+                        .clicked()
+                    {
+                        action = Some(UiAction::SwitchDesktop(account.id));
                     }
                     if ui.button("重命名").clicked() {
                         action = Some(UiAction::Rename(account.id, account.display_name.clone()));
@@ -486,7 +571,7 @@ fn render_footer(app: &MonitorApp, ui: &mut egui::Ui) {
     ui.separator();
     ui.horizontal_wrapped(|ui| {
         ui.label(
-            RichText::new("按需查询 · 不发送模型对话 · 不驻留 App Server · 无遥测")
+            RichText::new("按需查询 · 不发送模型对话 · 不驻留 App Server · 本机凭据切换 · 无遥测")
                 .small()
                 .color(ui.visuals().weak_text_color()),
         );
@@ -519,7 +604,7 @@ fn render_add_dialog(app: &mut MonitorApp, ctx: &egui::Context) {
             ui.add_space(7.0);
             ui.label(
                 RichText::new(
-                    "🔒 密码只能输入在 OpenAI 官方登录页面。本应用不会读取密码、浏览器 Cookie、访问令牌或 auth.json。",
+                    "🔒 密码只能输入在 OpenAI 官方登录页面。默认额度查询不会解析令牌；启用桌面账号切换后只在本机复制 auth.json 并解析必要身份字段。",
                 )
                 .color(Color32::from_rgb(80, 165, 120)),
             );
@@ -724,6 +809,36 @@ fn render_settings(app: &mut MonitorApp, ctx: &egui::Context) {
                     .text("缓存过期阈值"),
             );
             ui.add_space(8.0);
+            ui.heading("桌面账号切换");
+            ui.checkbox(
+                &mut app.config.settings.desktop_switch_enabled,
+                "启用“一键切换到 Codex 桌面应用”",
+            );
+            ui.label("全局 Codex Home（留空使用用户目录下的 .codex）");
+            ui.add_enabled_ui(app.config.settings.desktop_switch_enabled, |ui| {
+                ui.text_edit_singleline(&mut app.desktop_home_buffer);
+            });
+            if let Ok(path) = app.desktop_codex_home() {
+                ui.label(
+                    RichText::new(format!("当前解析路径：{}", path.display()))
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+            }
+            ui.label(
+                RichText::new(
+                    "切换会关闭并按需重启承载 Codex 的桌面宿主，正在运行的 Codex 任务会中断；普通聊天版 ChatGPT 不受影响。凭据只在本机复制，不上传。建议先结束正在运行的任务。",
+                )
+                .color(Color32::from_rgb(220, 145, 65)),
+            );
+            ui.label(
+                RichText::new(
+                    "仅支持文件型 auth.json；系统 Keychain/凭据管理器、Web Cookie 和某些嵌入页面会话不在本功能支持范围内。",
+                )
+                .small()
+                .color(ui.visuals().weak_text_color()),
+            );
+            ui.add_space(8.0);
             ui.heading("外观");
             let mut theme_preference = app.config.settings.theme;
             egui::ComboBox::from_id_salt("theme-preference")
@@ -756,7 +871,13 @@ fn render_settings(app: &mut MonitorApp, ctx: &egui::Context) {
             }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if ui.button("保存并重新检测 Codex").clicked() {
+                if ui
+                    .add_enabled(
+                        !app.worker.any_active(),
+                        egui::Button::new("保存并重新检测 Codex"),
+                    )
+                    .clicked()
+                {
                     apply = true;
                 }
                 if ui.button("关闭").clicked() {
@@ -788,7 +909,13 @@ fn apply_action(app: &mut MonitorApp, action: UiAction, ctx: egui::Context) {
             });
         }
         UiAction::SetEnabled(id, enabled) => app.set_account_enabled(id, enabled),
+        UiAction::SwitchDesktop(id) => app.begin_desktop_switch(id, ctx),
     }
+}
+
+fn has_ordinary_auth_file(account: &AccountRecord) -> bool {
+    std::fs::symlink_metadata(account.state_dir.join("auth.json"))
+        .is_ok_and(|metadata| metadata.file_type().is_file() && !metadata.file_type().is_symlink())
 }
 
 fn format_local_time(time: DateTime<Utc>) -> String {

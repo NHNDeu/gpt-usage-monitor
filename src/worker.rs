@@ -9,9 +9,14 @@ use tokio::runtime::Builder;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::account::{AccountRecord, CachedAccountData, LoginChallenge};
-use crate::app_server::{AppServerProcess, run_query};
+use crate::account::{AccountIdentity, AccountRecord, CachedAccountData, LoginChallenge};
+use crate::account_switch::{
+    CredentialOwner, DesktopCredentialInspection, harden_auth_file, inspect_global,
+    replace_global_credentials, rollback_global_credentials, validate_target,
+};
+use crate::app_server::{AppServerProcess, run_identity_query, run_query};
 use crate::codex_locator::{self, CodexInstallation};
+use crate::desktop_host;
 use crate::error::AppError;
 
 #[derive(Debug, Clone, Copy)]
@@ -19,6 +24,8 @@ pub enum OperationKind {
     Query,
     Login,
     Logout,
+    SwitchDesktopAccount,
+    InspectDesktopAccount,
 }
 
 #[derive(Debug)]
@@ -51,6 +58,17 @@ pub enum WorkerEvent {
     },
     LogoutFinished {
         account_id: Uuid,
+    },
+    DesktopInspected {
+        inspection: DesktopCredentialInspection,
+        verified_identity: Option<AccountIdentity>,
+    },
+    DesktopSwitchFinished {
+        account_id: Uuid,
+        identity: AccountIdentity,
+        recovery_path: Option<PathBuf>,
+        already_active: bool,
+        warning: Option<String>,
     },
     Failed {
         account_id: Uuid,
@@ -100,6 +118,14 @@ pub struct WorkerManager {
     active: HashMap<Uuid, CancellationToken>,
     threads: Vec<JoinHandle<()>>,
     codex_detection_active: bool,
+    desktop_operation: Option<DesktopOperation>,
+    desktop_cancel: Option<CancellationToken>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DesktopOperation {
+    Inspect,
+    Switch(Uuid),
 }
 
 impl Default for WorkerManager {
@@ -117,6 +143,8 @@ impl WorkerManager {
             active: HashMap::new(),
             threads: Vec::new(),
             codex_detection_active: false,
+            desktop_operation: None,
+            desktop_cancel: None,
         }
     }
 
@@ -143,7 +171,7 @@ impl WorkerManager {
         request_timeout: Duration,
         ctx: egui::Context,
     ) {
-        if self.active.contains_key(&account.id) {
+        if self.any_active() {
             return;
         }
         let cancel = CancellationToken::new();
@@ -188,6 +216,9 @@ impl WorkerManager {
         request_timeout: Duration,
         ctx: egui::Context,
     ) {
+        if self.any_active() {
+            return;
+        }
         let accounts: Vec<_> = accounts
             .into_iter()
             .filter(|account| account.enabled && !self.active.contains_key(&account.id))
@@ -274,7 +305,7 @@ impl WorkerManager {
         device_code: bool,
         ctx: egui::Context,
     ) {
-        if self.active.contains_key(&account.id) {
+        if self.any_active() {
             return;
         }
         let cancel = CancellationToken::new();
@@ -368,7 +399,7 @@ impl WorkerManager {
         request_timeout: Duration,
         ctx: egui::Context,
     ) {
-        if self.active.contains_key(&account.id) {
+        if self.any_active() {
             return;
         }
         let cancel = CancellationToken::new();
@@ -407,6 +438,272 @@ impl WorkerManager {
         }));
     }
 
+    pub fn inspect_desktop_account(
+        &mut self,
+        accounts: Vec<AccountRecord>,
+        codex_path: PathBuf,
+        global_home: PathBuf,
+        request_timeout: Duration,
+        ctx: egui::Context,
+    ) -> bool {
+        let Some(cancel) = self.reserve_desktop_operation(DesktopOperation::Inspect) else {
+            return false;
+        };
+        let sender = self.sender.clone();
+        self.threads.push(thread::spawn(move || {
+            let result = runtime().map_err(AppError::Io).and_then(|runtime| {
+                let mut inspection = inspect_global(&global_home, &accounts)?;
+                let verified_identity = if inspection.identity.is_some() {
+                    let mut verified = runtime.block_on(run_identity_query(
+                        codex_path,
+                        global_home,
+                        request_timeout,
+                        cancel,
+                    ))?;
+                    if !inspection
+                        .identity
+                        .as_ref()
+                        .is_some_and(|identity| identity.matches_account(&verified))
+                    {
+                        inspection.owner = CredentialOwner::Unmanaged;
+                    }
+                    if verified.account_id.is_none() {
+                        verified.account_id = inspection
+                            .identity
+                            .as_ref()
+                            .and_then(|identity| identity.account_id.clone());
+                    }
+                    Some(verified)
+                } else {
+                    None
+                };
+                Ok((inspection, verified_identity))
+            });
+            match result {
+                Ok((inspection, verified_identity)) => send(
+                    &sender,
+                    &ctx,
+                    WorkerEvent::DesktopInspected {
+                        inspection,
+                        verified_identity,
+                    },
+                ),
+                Err(error) => send_failure(
+                    &sender,
+                    &ctx,
+                    Uuid::nil(),
+                    OperationKind::InspectDesktopAccount,
+                    error,
+                ),
+            }
+        }));
+        true
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn switch_desktop_account(
+        &mut self,
+        target: AccountRecord,
+        accounts: Vec<AccountRecord>,
+        codex_path: PathBuf,
+        global_home: PathBuf,
+        recovery_root: PathBuf,
+        request_timeout: Duration,
+        ctx: egui::Context,
+    ) -> bool {
+        let Some(cancel) = self.reserve_desktop_operation(DesktopOperation::Switch(target.id))
+        else {
+            return false;
+        };
+        let sender = self.sender.clone();
+        self.threads.push(thread::spawn(move || {
+            send(
+                &sender,
+                &ctx,
+                WorkerEvent::Started {
+                    account_id: target.id,
+                    operation: OperationKind::SwitchDesktopAccount,
+                    step: "↻ 正在检查目标账号",
+                },
+            );
+            let result = runtime().map_err(AppError::Io).and_then(|runtime| {
+                let expected = validate_target(&target)?;
+                let mut target_identity = runtime.block_on(run_identity_query(
+                    codex_path.clone(),
+                    target.state_dir.clone(),
+                    request_timeout,
+                    cancel.clone(),
+                ))?;
+                if !expected.matches_account(&target_identity) {
+                    return Err(AppError::DesktopSwitch(
+                        "目标 auth.json 身份与目标账号 account/read 返回不一致".to_owned(),
+                    ));
+                }
+                if target_identity.account_id.is_none() {
+                    target_identity.account_id.clone_from(&expected.account_id);
+                }
+
+                let current = inspect_global(&global_home, &accounts)?;
+                if current.owner == CredentialOwner::Managed(target.id)
+                    && let Ok(global_identity) = runtime.block_on(run_identity_query(
+                        codex_path.clone(),
+                        global_home.clone(),
+                        request_timeout,
+                        cancel.clone(),
+                    ))
+                    && expected.matches_account(&global_identity)
+                {
+                    harden_auth_file(&global_home)?;
+                    return Ok((target_identity, None, true, None));
+                }
+
+                if cancel.is_cancelled() {
+                    return Err(AppError::Cancelled);
+                }
+                send(
+                    &sender,
+                    &ctx,
+                    WorkerEvent::Step {
+                        account_id: target.id,
+                        step: "↻ 正在识别并关闭桌面应用",
+                    },
+                );
+                // From this point onward the transaction is intentionally non-cancellable.
+                let host = desktop_host::stop_for_switch()?;
+                send(
+                    &sender,
+                    &ctx,
+                    WorkerEvent::Step {
+                        account_id: target.id,
+                        step: "↻ 正在保存当前账号",
+                    },
+                );
+                send(
+                    &sender,
+                    &ctx,
+                    WorkerEvent::Step {
+                        account_id: target.id,
+                        step: "↻ 正在切换凭据",
+                    },
+                );
+                let receipt = match replace_global_credentials(
+                    &target,
+                    &accounts,
+                    &global_home,
+                    &recovery_root,
+                ) {
+                    Ok(receipt) => receipt,
+                    Err(error) => {
+                        let _ = desktop_host::restart_after_switch(&host);
+                        return Err(error);
+                    }
+                };
+                let mut warnings = Vec::new();
+                if matches!(
+                    receipt.previous_owner,
+                    CredentialOwner::Unmanaged | CredentialOwner::Ambiguous
+                ) {
+                    warnings.push(
+                        "切换前的全局凭据属于未管理或身份有歧义的账号，已保存受限恢复副本"
+                            .to_owned(),
+                    );
+                }
+                if let Err(error) = desktop_host::restart_after_switch(&host) {
+                    warnings.push(error.diagnostic());
+                }
+                let warning = (!warnings.is_empty()).then(|| warnings.join("；"));
+                if host.was_running {
+                    send(
+                        &sender,
+                        &ctx,
+                        WorkerEvent::Step {
+                            account_id: target.id,
+                            step: "↻ 正在重新启动应用",
+                        },
+                    );
+                }
+                send(
+                    &sender,
+                    &ctx,
+                    WorkerEvent::Step {
+                        account_id: target.id,
+                        step: "↻ 正在验证桌面账号",
+                    },
+                );
+                let verification = runtime.block_on(run_identity_query(
+                    codex_path,
+                    global_home,
+                    request_timeout,
+                    CancellationToken::new(),
+                ));
+                match verification {
+                    Ok(mut identity) if expected.matches_account(&identity) => {
+                        if identity.account_id.is_none() {
+                            identity.account_id.clone_from(&expected.account_id);
+                        }
+                        Ok((identity, receipt.recovery_path.clone(), false, warning))
+                    }
+                    Ok(_) | Err(_) => {
+                        let running_after_restart = desktop_host::stop_for_switch();
+                        let shutdown = match running_after_restart {
+                            Ok(shutdown) => shutdown,
+                            Err(error) => {
+                                let recovery = receipt
+                                    .recovery_path
+                                    .as_ref()
+                                    .map(|path| path.display().to_string())
+                                    .unwrap_or_else(|| {
+                                        "切换前不存在全局 auth.json".to_owned()
+                                    });
+                                return Err(AppError::DesktopSwitch(format!(
+                                    "切换后身份校验失败，且无法安全关闭已重新启动的桌面宿主，因此未自动回滚。恢复信息：{recovery}。{}",
+                                    error.diagnostic()
+                                )));
+                            }
+                        };
+                        let rollback = rollback_global_credentials(&receipt);
+                        let _ = desktop_host::restart_after_switch(&shutdown);
+                        let recovery = receipt
+                            .recovery_path
+                            .as_ref()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|| "切换前不存在全局 auth.json".to_owned());
+                        match rollback {
+                            Ok(()) => Err(AppError::DesktopSwitch(format!(
+                                "切换后身份校验失败，已回滚全局凭据。恢复信息：{recovery}"
+                            ))),
+                            Err(error) => Err(AppError::DesktopSwitch(format!(
+                                "切换后身份校验失败且自动回滚失败；请从受限恢复副本手动恢复：{recovery}。{}",
+                                error.diagnostic()
+                            ))),
+                        }
+                    }
+                }
+            });
+            match result {
+                Ok((identity, recovery_path, already_active, warning)) => send(
+                    &sender,
+                    &ctx,
+                    WorkerEvent::DesktopSwitchFinished {
+                        account_id: target.id,
+                        identity,
+                        recovery_path,
+                        already_active,
+                        warning,
+                    },
+                ),
+                Err(error) => send_failure(
+                    &sender,
+                    &ctx,
+                    target.id,
+                    OperationKind::SwitchDesktopAccount,
+                    error,
+                ),
+            }
+        }));
+        true
+    }
+
     pub fn cancel(&self, account_id: Uuid) {
         if let Some(token) = self.active.get(&account_id) {
             token.cancel();
@@ -418,7 +715,20 @@ impl WorkerManager {
     }
 
     pub fn any_active(&self) -> bool {
-        !self.active.is_empty()
+        !self.active.is_empty() || self.desktop_operation.is_some()
+    }
+
+    pub fn desktop_switch_active(&self) -> bool {
+        matches!(self.desktop_operation, Some(DesktopOperation::Switch(_)))
+    }
+
+    pub fn cancel_all(&self) {
+        for token in self.active.values() {
+            token.cancel();
+        }
+        if let Some(token) = &self.desktop_cancel {
+            token.cancel();
+        }
     }
 
     pub fn drain_events(&mut self) -> Vec<WorkerEvent> {
@@ -432,7 +742,23 @@ impl WorkerManager {
                 | WorkerEvent::Failed { account_id, .. } => {
                     self.active.remove(account_id);
                 }
+                WorkerEvent::DesktopInspected { .. }
+                | WorkerEvent::DesktopSwitchFinished { .. } => {
+                    self.desktop_operation = None;
+                    self.desktop_cancel = None;
+                }
                 _ => {}
+            }
+            if matches!(
+                event,
+                WorkerEvent::Failed {
+                    operation: OperationKind::SwitchDesktopAccount
+                        | OperationKind::InspectDesktopAccount,
+                    ..
+                }
+            ) {
+                self.desktop_operation = None;
+                self.desktop_cancel = None;
             }
         }
         self.threads.retain(|thread| !thread.is_finished());
@@ -443,10 +769,28 @@ impl WorkerManager {
         for token in self.active.values() {
             token.cancel();
         }
+        if let Some(token) = &self.desktop_cancel {
+            token.cancel();
+        }
         while let Some(thread) = self.threads.pop() {
             let _ = thread.join();
         }
         self.active.clear();
+        self.desktop_operation = None;
+        self.desktop_cancel = None;
+    }
+
+    fn reserve_desktop_operation(
+        &mut self,
+        operation: DesktopOperation,
+    ) -> Option<CancellationToken> {
+        if self.any_active() {
+            return None;
+        }
+        let cancel = CancellationToken::new();
+        self.desktop_operation = Some(operation);
+        self.desktop_cancel = Some(cancel.clone());
+        Some(cancel)
     }
 }
 
@@ -479,4 +823,26 @@ fn send_failure(
             failure: error.into(),
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::{DesktopOperation, WorkerManager};
+
+    #[test]
+    fn second_desktop_switch_is_rejected_by_global_lock() {
+        let mut worker = WorkerManager::new();
+        assert!(
+            worker
+                .reserve_desktop_operation(DesktopOperation::Switch(Uuid::new_v4()))
+                .is_some()
+        );
+        assert!(
+            worker
+                .reserve_desktop_operation(DesktopOperation::Switch(Uuid::new_v4()))
+                .is_none()
+        );
+    }
 }

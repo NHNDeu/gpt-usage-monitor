@@ -1,7 +1,8 @@
 # Codex Usage Monitor
 
 一个轻量、原生、跨平台的桌面工具，用来统一查看多个 ChatGPT 账号的
-Codex 使用比例、剩余比例和重置时间。
+Codex 使用比例、剩余比例和重置时间，并可在显式启用后把承载 Codex 的
+ChatGPT/Codex 桌面宿主安全切换到某个已管理账号。
 
 它只调用本机 Codex CLI 的官方 App Server 账户接口，不发送模型对话，
 不抓取网页，不读取浏览器 Cookie，不使用第三方额度服务，也不会在关闭窗口后
@@ -33,7 +34,8 @@ codex app-server --stdio
 多个 App Server。
 
 详见 [架构说明](docs/ARCHITECTURE.md) 和
-[协议兼容记录](docs/PROTOCOL_COMPATIBILITY.md)。
+[协议兼容记录](docs/PROTOCOL_COMPATIBILITY.md)。桌面账号切换的事务、安全边界
+与恢复步骤见 [桌面账号切换说明](docs/DESKTOP_ACCOUNT_SWITCHING.md)。
 
 ## 前置要求
 
@@ -117,6 +119,9 @@ Windows 构建设置了 GUI subsystem，因此双击不会额外弹出控制台�
 - “浏览器重新登录”重新走官方 OAuth。
 - “设备码登录”适合浏览器回调或默认浏览器异常时使用。
 - “退出登录”调用官方 `account/logout`，不影响其他账号。
+- “切换到桌面应用”只在设置中主动启用、账号已完成 OAuth 且存在普通
+  `auth.json` 时可用。它会关闭经过身份确认的 Codex 桌面宿主、切换凭据、
+  按需重启并用 `account/read` 复核身份。
 - “重命名”只修改本地显示名称。
 - “启用”开关决定该账号是否参加自动/全部刷新。
 - 查询或登录中可点击“取消”；应用会关闭对应 App Server。
@@ -148,6 +153,7 @@ config.json                  本地设置、完整邮箱、套餐和最后成功
 accounts/<uuid>/             该账号独立 CODEX_HOME（敏感）
 accounts/<uuid>/auth.json    可能存在；由 Codex 官方管理（高度敏感）
 logs/codex-usage-monitor.log 脱敏、限长诊断日志
+desktop-auth-recovery/       桌面切换前的受限恢复副本（按需创建）
 ```
 
 配置带 `schema_version`，写入使用临时文件加原子替换。查询失败时保留最后成功
@@ -156,7 +162,13 @@ logs/codex-usage-monitor.log 脱敏、限长诊断日志
 ## 安全说明
 
 - 本应用没有密码输入框。不要把 ChatGPT 密码输入本应用。
-- 不读取、解析、复制、上传或显示 `auth.json`。
+- 默认额度查询流程不读取、解析或显示令牌；它只通过官方 App Server 获取账号
+  与额度域模型。
+- 只有用户在设置中主动启用桌面账号切换后，切换事务才会在账号目录和全局
+  Codex Home 之间复制 `auth.json`，并只解析稳定账号 ID 和经过验证的完整邮箱，
+  用于防止串号。
+- 不显示、不记录、不上传 access token、refresh token、ID token 或完整授权响应；
+  令牌也不会进入普通 `config.json`。
 - `account/read` 返回的完整邮箱会显示在账号卡片并保存在权限受限的本机
   `config.json`；不会上传到本项目的任何服务，也不会用作内部账号 ID。
 - 不向诊断日志记录访问令牌、授权头、完整邮箱或完整授权响应。
@@ -164,6 +176,11 @@ logs/codex-usage-monitor.log 脱敏、限长诊断日志
 - 每个进程只收到自己的 `CODEX_HOME`，不会修改系统全局环境变量。
 - 强制使用 Codex 官方 `file` 凭据存储以获得确定的多目录隔离。
 - macOS/Unix 账号目录权限为 `0700`，配置文件为 `0600`。
+- macOS/Unix 的全局/恢复目录设为 `0700`，新写入凭据设为 `0600`；写入会在
+  同目录创建临时文件、flush、`sync_all` 后原子替换。
+- 无法识别的全局账号不会写回任何受管账号目录，而会先保存到
+  `desktop-auth-recovery`。`last_active_desktop_account_id` 仅是 UI 缓存，绝不
+  参与凭据归属判断。
 - 日志约 1 MB 时轮转，写入前会脱敏；没有遥测或分析服务。
 - 核心功能只让本地 Codex 与 OpenAI 官方服务通信。
 
@@ -215,6 +232,17 @@ Finder 不会继承交互式 shell 的完整 `PATH`。应用额外检查：
 对该本地账号执行“退出登录”，然后重新登录；在 OpenAI 官方页面切换到正确的
 ChatGPT 账号。其他本地账号不会受影响。
 
+### 桌面账号切换不可用
+
+先在设置中主动启用，并确认目标账号已经登录且账号目录中存在普通文件
+`auth.json`。当前版本只支持文件型凭据；若全局 Codex 明确配置为 macOS
+Keychain、Windows 凭据管理器或其他 keyring，应用会拒绝切换并提示不支持。
+
+普通聊天版 ChatGPT 与承载 Codex 的桌面宿主可能都叫 `ChatGPT`，因此应用不会
+按进程名批量结束进程。macOS 优先核验 `com.openai.codex`，明确排除
+`com.openai.chat`；Windows 结合完整路径、`OpenAI.Codex` 包身份和内置
+`resources/codex.exe` 判断。身份无法确认时会要求手动关闭。
+
 ### OAuth 回调失败
 
 取消当前登录并使用“设备码登录”。也可复制窗口中的官方地址到其他浏览器。
@@ -253,7 +281,13 @@ Developer ID 签名、公证和 stapling。
 - 官方可能按账号/套餐只返回一个窗口。应用只展示实际返回的数据，不推算请求
   次数、Token 余额、分钟数或模型可运行次数。
 - `account/usage/read` 是可选摘要；失败不会影响核心限额查询。
-- 本项目没有安装器、后台刷新、托盘、通知、自动账号切换或任务分配。
+- 桌面账号切换会中断正在运行的 Codex 任务；应用不会代替用户保存任务状态。
+- 只支持文件型 `auth.json`。系统 Keychain/凭据管理器不在当前支持范围内。
+- 普通 ChatGPT Web Cookie 不一定随 `auth.json` 改变，嵌入式 Web 页面可能暂时
+  保留旧 Cookie 会话；最终身份判断仍以 Codex `account/read` 为准。
+- OpenAI 后续可能改变 Bundle ID、Package Family、安装路径或凭据格式；运行时
+  检测失败时应用会保守拒绝，不会按硬编码名称强制结束进程。
+- 本项目没有安装器、后台刷新、托盘、通知、定时自动账号切换或任务分配。
 
 ## 测试
 
@@ -266,6 +300,8 @@ Developer ID 签名、公证和 stapling。
 - 可选 usage；
 - 多账号目录隔离、配置迁移、缓存状态；
 - 查询完成后的子进程清理。
+- 凭据身份优先级、未知账号保护、恢复副本、原子替换、权限和失败不损坏；
+- 桌面切换全局互斥、macOS Bundle ID 与 Windows 路径/包身份规则。
 
 CI 在 macOS 和 Windows 分别执行格式检查、Clippy、测试和 release 构建，并上传
 平台产物。
